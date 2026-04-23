@@ -1,6 +1,11 @@
 #include "cli.h"
 #include "parser/parser.h"
 #include<iostream>
+#include <filesystem>
+#include <fstream>
+
+namespace fs = std::filesystem;
+
 
 void CLI::run() {
     std::string input;
@@ -129,6 +134,47 @@ void CLI::executeQuery(const std::string& query) {
         std::cout << "[CLI] Query parsed successfully.\n";
 
         printQuery(parsedQuery.get());
+
+        if (parsedQuery->type == QueryType::USE) {
+            auto* uq = static_cast<UseQuery*>(parsedQuery.get());
+
+            std::string dbFile = uq->db_name;
+
+            if (dbFile.find(".db") == std::string::npos) {
+                dbFile += ".db";
+            }
+
+            if (!fs::exists(dbFile)) {
+                std::cout << "[CLI] Database file not found. Creating...\n";
+
+                std::ofstream file(dbFile, std::ios::binary);
+                if (!file) {
+                    std::cout << "[ERROR] Failed to create database file\n";
+                    return;
+                }
+                file.close();
+            }
+
+            if (!fs::is_regular_file(dbFile)) {
+                std::cout << "[ERROR] Invalid database file\n";
+                return;
+            }
+
+            current_db_path = dbFile;
+            db_selected = true;
+
+            executor.setDatabase(dbFile);
+
+            std::cout << "[CLI] Using database: " << dbFile << "\n";
+            return;
+        }
+
+        if (!db_selected) {
+            std::cout << "[ERROR] No database selected. Use USE <name>;\n";
+            return;
+        }
+
+        executor.execute(*parsedQuery);
 
     } catch (const std::exception& e) {
         std::cout << "[ERROR] " << e.what() << std::endl;

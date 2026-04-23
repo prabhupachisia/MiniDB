@@ -17,7 +17,7 @@ struct Query {
     virtual ~Query() = default;
 };
 
-struct Column {
+struct ColumnDef {
     std::string name;
     std::string type;
     bool is_primary = false;
@@ -40,7 +40,7 @@ struct Condition {
 
 struct CreateQuery : Query {
     std::string table_name;
-    std::vector<Column> columns;
+    std::vector<ColumnDef> columns;
     std::vector<Index> indexes;
 
     CreateQuery() : Query(QueryType::CREATE) {}

@@ -78,7 +78,7 @@ private:
             }
             // ---- COLUMN definition ----
             else {
-                Column col;
+                ColumnDef col;
 
                 col.name = consume(TokenType::IDENTIFIER).value;
                 col.type = consume(TokenType::IDENTIFIER).value;
