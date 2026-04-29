@@ -1,6 +1,7 @@
 #include "executor.h"
 #include <iostream>
 #include <unordered_set>
+#include <algorithm>
 
 // ------------------ HELPERS ------------------
 
@@ -213,3 +214,56 @@ void Executor::handleDelete(const DeleteQuery& q) {
 
     std::cout << "[Executor] Rows deleted from " << q.table_name << "\n";
 }
+
+DataType Executor::parseDataType(const std::string& typeStr) {
+    std::string t = typeStr;
+
+    std::transform(t.begin(), t.end(), t.begin(), ::toupper);
+
+    if (t == "INT") return DataType::INT;
+    if (t == "TEXT") return DataType::TEXT;
+
+    throw std::runtime_error("Unknown type: " + typeStr);
+}
+
+Value Executor::parseValue(const std::string& valStr, DataType expectedType) {
+
+    if (expectedType == DataType::INT) {
+        try {
+            return Value(std::stoi(valStr));
+        } catch (...) {
+            throw std::runtime_error("Invalid INT value: " + valStr);
+        }
+    }
+
+    if (expectedType == DataType::TEXT) {
+        if (valStr.size() >= 2 &&
+            valStr.front() == '\'' &&
+            valStr.back() == '\'') {
+
+            return Value(valStr.substr(1, valStr.size() - 2));
+        }
+
+        throw std::runtime_error("TEXT must be in quotes: " + valStr);
+    }
+
+    throw std::runtime_error("Invalid value type");
+}
+
+bool Executor::matchCondition(
+    const Row& row,
+    const Schema& schema,
+    const Condition& cond
+) {
+    if (cond.op != "=") {
+        throw std::runtime_error("Only '=' supported in WHERE");
+    }
+
+    int colIndex = schema.getColumnIndex(cond.column);
+
+    DataType type = schema.columns[colIndex].type;
+    Value rhs = parseValue(cond.value, type);
+
+    return row[colIndex] == rhs;
+}
+
