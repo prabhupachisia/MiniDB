@@ -1,174 +1,187 @@
-#include "executor/executor.h"
+#include "executor.h"
 #include <iostream>
-#include <stdexcept>
-#include <algorithm>
 
-void Executor::setDatabase(const std::string& path) {
-    db_path = path;
+// ------------------ HELPERS ------------------
 
-    schemas.clear();
-    tables.clear();
+DataType parseType(const std::string& type) {
+    if (type == "INT") return DataType::INT;
+    if (type == "TEXT") return DataType::TEXT;
+    throw std::runtime_error("Unknown data type: " + type);
 }
+
+// ------------------ MAIN EXECUTE ------------------
 
 void Executor::execute(const Query& query) {
     switch (query.type) {
+        case QueryType::USE:
+            executeUse(static_cast<const UseQuery&>(query));
+            break;
 
         case QueryType::CREATE:
-            handleCreate(static_cast<const CreateQuery&>(query));
+            executeCreate(static_cast<const CreateQuery&>(query));
             break;
 
         case QueryType::INSERT:
-            handleInsert(static_cast<const InsertQuery&>(query));
+            executeInsert(static_cast<const InsertQuery&>(query));
             break;
 
-        case QueryType::SELECT: {
-            auto rows = handleSelect(static_cast<const SelectQuery&>(query));
-
-            for (const auto& row : rows) {
-                for (const auto& val : row) {
-                    std::cout << val.toString() << " ";
-                }
-                std::cout << "\n";
-            }
+        case QueryType::SELECT:
+            executeSelect(static_cast<const SelectQuery&>(query));
             break;
-        }
 
         case QueryType::DELETE:
-            handleDelete(static_cast<const DeleteQuery&>(query));
+            executeDelete(static_cast<const DeleteQuery&>(query));
             break;
 
         default:
-            throw std::runtime_error("Unsupported query type in executor");
+            std::cout << "Unsupported query\n";
     }
 }
 
+// ------------------ USE ------------------
 
-void Executor::handleCreate(const CreateQuery& q) {
-    if (schemas.count(q.table_name)) {
-        throw std::runtime_error("Table already exists");
+void Executor::executeUse(const UseQuery& query) {
+    currentDB = query.db_name;
+    storage.openDatabase(currentDB);
+
+    std::cout << "Using database: " << currentDB << std::endl;
+}
+
+// ------------------ CREATE ------------------
+
+void Executor::executeCreate(const CreateQuery& query) {
+    if (storage.getSchemas().find(query.table_name) != storage.getSchemas().end()) {
+        std::cout << "Table already exists\n";
+        return;
     }
 
     Schema schema;
-    schema.tableName = q.table_name;
+    schema.tableName = query.table_name;
 
-    for (const auto& col : q.columns) {
-        Column column;
-        column.name = col.name;
-        column.type = parseDataType(col.type);
-        column.isPrimaryKey = col.is_primary;
+    for (const auto& col : query.columns) {
+        Column c;
+        c.name = col.name;
+        c.type = parseType(col.type);
+        c.isPrimaryKey = col.is_primary;
 
-        schema.columns.push_back(column);
+        schema.columns.push_back(c);
     }
 
-    schemas[q.table_name] = schema;
-    tables[q.table_name] = {};
+    storage.saveSchema(schema);
 
-    std::cout << "[Executor] Table created: " << q.table_name << "\n";
+    std::cout << "Table created: " << query.table_name << std::endl;
 }
 
-void Executor::handleInsert(const InsertQuery& q) {
-    if (!schemas.count(q.table_name)) {
-        throw std::runtime_error("Table not found");
+// ------------------ INSERT ------------------
+
+void Executor::executeInsert(const InsertQuery& query) {
+    const auto& schemas = storage.getSchemas();
+
+    if (schemas.find(query.table_name) == schemas.end()) {
+        std::cout << "Table not found\n";
+        return;
     }
 
-    const Schema& schema = schemas[q.table_name];
+    const Schema& schema = schemas.at(query.table_name);
 
-    if (q.values.size() != schema.columns.size()) {
-        throw std::runtime_error("Column count mismatch");
+    if (query.values.size() != schema.columns.size()) {
+        std::cout << "Column count mismatch\n";
+        return;
     }
 
     Row row;
 
-    for (size_t i = 0; i < q.values.size(); i++) {
-        row.push_back(parseValue(q.values[i], schema.columns[i].type));
+    for (int i = 0; i < query.values.size(); i++) {
+        if (schema.columns[i].type == DataType::INT) {
+            try {
+                row.emplace_back(std::stoi(query.values[i]));
+            } catch (...) {
+                std::cout << "Invalid INT value for column: "
+                          << schema.columns[i].name << "\n";
+                return;
+            }
+        } else {
+            row.emplace_back(query.values[i]);
+        }
     }
 
     int pkIndex = schema.getPrimaryKeyIndex();
+    std::cout << "[DEBUG] PK Index: " << pkIndex << "\n";
+
     if (pkIndex != -1) {
-        for (const auto& existingRow : tables[q.table_name]) {
-            if (existingRow[pkIndex] == row[pkIndex]) {
-                throw std::runtime_error("Duplicate primary key");
+        auto existingRows = storage.readAllRows(query.table_name);
+
+        for (const auto& existing : existingRows) {
+            if (existing[pkIndex] == row[pkIndex]) {
+                std::cout << "Duplicate primary key value\n";
+                return;
             }
         }
     }
 
-    tables[q.table_name].push_back(row);
+    storage.insertRow(query.table_name, row);
 
-    std::cout << "[Executor] Row inserted into " << q.table_name << "\n";
+    std::cout << "1 row inserted\n";
 }
 
-std::vector<Row> Executor::handleSelect(const SelectQuery& q) {
-    if (!schemas.count(q.table_name)) {
-        throw std::runtime_error("Table not found");
+// ------------------ SELECT ------------------
+
+void Executor::executeSelect(const SelectQuery& query) {
+    const auto& schemas = storage.getSchemas();
+
+    if (schemas.find(query.table_name) == schemas.end()) {
+        std::cout << "Table not found\n";
+        return;
     }
 
-    const Schema& schema = schemas[q.table_name];
-    const auto& table = tables[q.table_name];
+    const Schema& schema = schemas.at(query.table_name);
+    auto rows = storage.readAllRows(query.table_name);
 
-    std::vector<Row> result;
+    // Print header
+    for (const auto& col : schema.columns) {
+        std::cout << col.name << "\t";
+    }
+    std::cout << "\n";
 
-    for (const auto& row : table) {
-        if (q.has_where) {
-            if (!matchCondition(row, schema, q.where)) continue;
+    for (const auto& row : rows) {
+        bool match = true;
+
+        if (query.has_where) {
+            int idx = schema.getColumnIndex(query.where.column);
+
+            if (idx == -1) {
+                std::cout << "Invalid WHERE column\n";
+                return;
+            }
+
+            const Value& val = row[idx];
+
+            if (schema.columns[idx].type == DataType::INT) {
+                int condVal = std::stoi(query.where.value);
+
+                if (query.where.op == "=") {
+                    match = (val.asInt() == condVal);
+                }
+            } else {
+                if (query.where.op == "=") {
+                    match = (val.asText() == query.where.value);
+                }
+            }
         }
-        result.push_back(row);
-    }
 
-    return result;
-}
-
-void Executor::handleDelete(const DeleteQuery& q) {
-    if (!schemas.count(q.table_name)) {
-        throw std::runtime_error("Table not found");
-    }
-
-    const Schema& schema = schemas[q.table_name];
-    auto& table = tables[q.table_name];
-
-    table.erase(
-        std::remove_if(table.begin(), table.end(),
-            [&](const Row& row) {
-                if (!q.has_where) return true;
-                return matchCondition(row, schema, q.where);
-            }),
-        table.end()
-    );
-
-    std::cout << "[Executor] Rows deleted from " << q.table_name << "\n";
-}
-
-DataType Executor::parseDataType(const std::string& typeStr) {
-    if (typeStr == "INT") return DataType::INT;
-    if (typeStr == "TEXT") return DataType::TEXT;
-
-    throw std::runtime_error("Unknown type: " + typeStr);
-}
-
-Value Executor::parseValue(const std::string& valStr, DataType expectedType) {
-    if (expectedType == DataType::INT) {
-        return Value(std::stoi(valStr));
-    }
-
-    if (expectedType == DataType::TEXT) {
-        if (valStr.front() == '\'' && valStr.back() == '\'') {
-            return Value(valStr.substr(1, valStr.size() - 2));
+        if (match) {
+            for (const auto& val : row) {
+                std::cout << val.toString() << "\t";
+            }
+            std::cout << "\n";
         }
-        return Value(valStr);
     }
 
-    throw std::runtime_error("Invalid value");
+    std::cout << "Query executed\n";
 }
 
-bool Executor::matchCondition(
-    const Row& row,
-    const Schema& schema,
-    const Condition& cond
-) {
-    int colIndex = schema.getColumnIndex(cond.column);
+// ------------------ DELETE ------------------
 
-    DataType type = schema.columns[colIndex].type;
-    Value rhs = parseValue(cond.value, type);
-
-    return row[colIndex] == rhs;
+void Executor::executeDelete(const DeleteQuery& query) {
+    std::cout << "DELETE not supported yet (will be added after paging)\n";
 }
-

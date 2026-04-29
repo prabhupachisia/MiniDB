@@ -130,7 +130,6 @@ std:: vector<Token> Tokenizer::tokenize(){
                     break;
                 case '\'':
                     tokens.push_back(readString());
-                    advance();
                     break;
                 default:
                     throw std::runtime_error(

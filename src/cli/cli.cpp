@@ -3,6 +3,7 @@
 #include<iostream>
 #include <filesystem>
 #include <fstream>
+#include "parser/tokenizer.h"
 
 namespace fs = std::filesystem;
 
@@ -22,6 +23,8 @@ void CLI::run() {
             if (input == ".exit") break;
             continue;
         }
+
+        
 
         buffer += input + " ";
 
@@ -135,6 +138,8 @@ void CLI::executeQuery(const std::string& query) {
 
         printQuery(parsedQuery.get());
 
+        
+
         if (parsedQuery->type == QueryType::USE) {
             auto* uq = static_cast<UseQuery*>(parsedQuery.get());
 
@@ -162,8 +167,7 @@ void CLI::executeQuery(const std::string& query) {
 
             current_db_path = dbFile;
             db_selected = true;
-
-            executor.setDatabase(dbFile);
+            executor.execute(*parsedQuery);
 
             std::cout << "[CLI] Using database: " << dbFile << "\n";
             return;
@@ -173,10 +177,13 @@ void CLI::executeQuery(const std::string& query) {
             std::cout << "[ERROR] No database selected. Use USE <name>;\n";
             return;
         }
-
         executor.execute(*parsedQuery);
-
     } catch (const std::exception& e) {
+        auto tokens = Tokenizer(query).tokenize();
+
+        for (auto& t : tokens) {
+            std::cout << (int)t.type << " : " << t.value << "\n";
+        }
         std::cout << "[ERROR] " << e.what() << std::endl;
     }
 }

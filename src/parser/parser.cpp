@@ -105,9 +105,8 @@ private:
         return query;
     }
 
-    //Insert Query
-    std::unique_ptr<Query> parseInsert(){
-        consume(TokenType::INSERT);
+    std::unique_ptr<Query> parseInsert() {
+        consume(TokenType::INTO);   // 🔥 IMPORTANT FIX
 
         auto query = std::make_unique<InsertQuery>();
 
@@ -116,7 +115,17 @@ private:
         consume(TokenType::VALUES);
         consume(TokenType::LPAREN);
 
-        do{
+        // First value
+        Token val = advance();
+        if (val.type != TokenType::NUMBER &&
+            val.type != TokenType::STRING &&
+            val.type != TokenType::IDENTIFIER) {
+            throw std::runtime_error("Invalid value in INSERT");
+        }
+        query->values.push_back(val.value);
+
+    // Remaining values
+        while (match(TokenType::COMMA)) {
             Token val = advance();
 
             if (val.type != TokenType::NUMBER &&
@@ -126,9 +135,10 @@ private:
             }
 
             query->values.push_back(val.value);
-        }while(match(TokenType::COMMA));
+        }
 
         consume(TokenType::RPAREN);
+        consume(TokenType::SEMICOLON);
 
         return query;
     }
