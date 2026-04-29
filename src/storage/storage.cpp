@@ -1,25 +1,16 @@
 #include "storage.h"
 #include "serializer.h"
+#include "pager/page_utils.h"
+#include "memory_stream.h"
 #include <iostream>
-
+#include <cstring>
 
 void Storage::openDatabase(const std::string& path) {
     dbPath = path;
 
-    dbFile.open(path, std::ios::in | std::ios::out | std::ios::binary);
+    pager.open(path);
 
-    if (!dbFile.is_open()) {
-        dbFile.open(path, std::ios::out | std::ios::binary);
-        dbFile.close();
-
-        dbFile.open(path, std::ios::in | std::ios::out | std::ios::binary);
-    }
-
-    dbFile.clear();
-    dbFile.seekg(0, std::ios::end);
-    std::streampos size = dbFile.tellg();
-
-    if (size == 0) {
+    if (pager.getPageCount() == 0) {
         initNewDatabase();
     } else {
         readHeader();
@@ -27,162 +18,247 @@ void Storage::openDatabase(const std::string& path) {
     }
 }
 
+// ---------- INIT ----------
+
 void Storage::initNewDatabase() {
-    dbFile.seekp(0);
+    size_t pageNum = pager.allocatePage();
+    auto& page = pager.getPage(pageNum);
 
-    dbFile.write("MINIDB", 6);
-    Serializer::writeInt(dbFile, 1);
+    PageHeader header;
+    header.numSlots = 0;
+    header.freeSpaceOffset = PAGE_SIZE;
 
-    Serializer::writeInt(dbFile, 0);
+    setHeader(page, header);
 
-    int currentSize = 6 + 4 + 4;
-    int padding = 64 - currentSize;
-
-    std::string pad(padding, '\0');
-    dbFile.write(pad.c_str(), pad.size());
-
-    dbFile.flush();
+    pager.flush(pageNum);
 }
-
-// ------------------ HEADER ------------------
 
 void Storage::readHeader() {
-    dbFile.seekg(0);
+    if (pager.getPageCount() == 0) return;
 
-    char magic[6];
-    dbFile.read(magic, 6);
+    auto& page = pager.getPage(META_PAGE);
 
-    if (std::string(magic, 6) != "MINIDB") {
-        throw std::runtime_error("Invalid database file");
-    }
+    PageHeader header = getHeader(page);
 
-    int version = Serializer::readInt(dbFile);
-
-    if (version != 1) {
-        throw std::runtime_error("Unsupported DB version");
-    }
+    // future use (schema, metadata)
 }
 
-// ------------------ SCHEMA ------------------
+// ---------- SCHEMA (TEMP STUB) ----------
 
 void Storage::saveSchema(const Schema& schema) {
-    dbFile.clear();
-
-    dbFile.seekg(6 + 4);
-    int schemaCount = Serializer::readInt(dbFile);
-
-    dbFile.seekp(6 + 4);
-    Serializer::writeInt(dbFile, schemaCount + 1);
-
-    dbFile.seekp(0, std::ios::end);
-    Serializer::writeSchema(dbFile, schema);
-
     schemas[schema.tableName] = schema;
 
-    dbFile.flush();
+    tablePages[schema.tableName] = {};
 }
 
 void Storage::loadSchemas() {
-    dbFile.clear();
-
-    dbFile.seekg(6 + 4);
-    int schemaCount = Serializer::readInt(dbFile);
-
-    dbFile.seekg(64);
-
-    for (int i = 0; i < schemaCount; i++) {
-        Schema schema = Serializer::readSchema(dbFile);
-        schemas[schema.tableName] = schema;
-    }
+    // TODO: load from META_PAGE later
 }
 
-// ------------------ INSERT ------------------
+// ---------- PAGE HELPERS ----------
 
-void Storage::insertRow(const std::string& tableName, const Row& row) {
-    if (schemas.find(tableName) == schemas.end()) {
-        throw std::runtime_error("Table not found: " + tableName);
+size_t Storage::getLastDataPage(const std::string& tableName) {
+    auto& pages = tablePages[tableName];
+
+    if (pages.empty()) {
+        return allocateNewDataPage(tableName);
     }
 
-    if (row.size() != schemas[tableName].columns.size()) {
-        throw std::runtime_error("Invalid row size");
-    }
-
-    dbFile.clear();
-    dbFile.seekp(0, std::ios::end);
-
-    std::cout << "[DEBUG] Writing row for table: " << tableName << "\n";
-
-    Serializer::writeString(dbFile, tableName);
-
-std::streampos sizePos = dbFile.tellp();
-Serializer::writeInt(dbFile, 0);
-
-std::streampos start = dbFile.tellp();
-
-Serializer::writeRow(dbFile, row);
-
-std::streampos end = dbFile.tellp();
-
-int rowSize = static_cast<int>(end - start);
-
-dbFile.seekp(sizePos);
-Serializer::writeInt(dbFile, rowSize);
-
-dbFile.seekp(end);
+    return pages.back();
 }
 
-// ------------------ SELECT ------------------
 
-std::vector<Row> Storage::readAllRows(const std::string& tableName) {
-    std::vector<Row> result;
+size_t Storage::allocateNewDataPage(const std::string& tableName) {
+    size_t pageNum = pager.allocatePage();
+    auto& page = pager.getPage(pageNum);
 
-    if (schemas.find(tableName) == schemas.end()) {
-        throw std::runtime_error("Table not found: " + tableName);
-    }
+    PageHeader header;
+    header.numSlots = 0;
+    header.freeSpaceOffset = PAGE_SIZE;
 
-    dbFile.clear();
-    dbFile.seekg(6 + 4);
-    int schemaCount = Serializer::readInt(dbFile);
+    setHeader(page, header);
 
-    dbFile.seekg(64);
+    pager.flush(pageNum);
 
-    // Skip schemas properly
-    for (int i = 0; i < schemaCount; i++) {
-        Serializer::readSchema(dbFile);
-    }
+    tablePages[tableName].push_back(pageNum);
 
-    std::cout << "[DEBUG] Reading rows for table: " << tableName << "\n";
-
-    // Read rows
-    while (dbFile.peek() != EOF) {
-    std::string table;
-
-    try {
-        table = Serializer::readString(dbFile);
-    } catch (...) {
-        break;
-    }
-
-    if (schemas.find(table) == schemas.end()) {
-        break;
-    }
-
-    int rowSize = Serializer::readInt(dbFile);
-
-    std::streampos rowStart = dbFile.tellg();
-
-    Row row = Serializer::readRow(dbFile, schemas[table]);
-
-    dbFile.seekg(rowStart + static_cast<std::streamoff>(rowSize));
-
-    if (table == tableName) {
-        result.push_back(row);
-    }
+    return pageNum;
 }
+
+// ---------- INSERT ----------
+
+RID Storage::insertRow(const std::string& tableName, const Row& row) {
+    const Schema& schema = schemas[tableName];
+
+    size_t pageNum = getLastDataPage(tableName);
+    auto& page = pager.getPage(pageNum);
+
+    PageHeader header = getHeader(page);
+
+    std::vector<char> temp(PAGE_SIZE);
+    MemoryBuffer buf(temp.data(), temp.size());
+    std::ostream out(&buf);
+
+    Serializer::writeRow(out, row);
+
+    uint16_t rowSize = static_cast<uint16_t>(out.tellp());
+    uint16_t slotSize = sizeof(Slot);
+
+    uint16_t slotStart = sizeof(PageHeader) + header.numSlots * sizeof(Slot);
+
+    if (header.freeSpaceOffset - slotStart < rowSize + slotSize) {
+        pageNum = allocateNewDataPage(tableName);
+        return insertRow(tableName, row);
+    }
+
+    // write row
+    header.freeSpaceOffset -= rowSize;
+    uint16_t rowOffset = header.freeSpaceOffset;
+
+    memcpy(page.data() + rowOffset, temp.data(), rowSize);
+
+    // create slot
+    Slot slot;
+    slot.offset = rowOffset;
+    slot.size = rowSize;
+    slot.isDeleted = 0;
+
+    uint16_t slotIndex = header.numSlots;
+
+    memcpy(page.data() + sizeof(PageHeader) + slotIndex * sizeof(Slot),
+           &slot, sizeof(Slot));
+
+    header.numSlots++;
+
+    setHeader(page, header);
+    pager.flush(pageNum);
+
+    return RID(pageNum, slotIndex);
+}
+
+//----------READ-----------
+
+Row Storage::getRow(const RID& rid) {
+    auto& page = pager.getPage(rid.pageNum);
+
+    Slot slot;
+    memcpy(&slot,
+           page.data() + sizeof(PageHeader) + rid.slotIndex * sizeof(Slot),
+           sizeof(Slot));
+
+    if (slot.isDeleted) return {};
+
+    const Schema& schema = schemas.begin()->second; // temp (fix later per table)
+
+    char* rowPtr = page.data() + slot.offset;
+
+    MemoryBuffer buf(rowPtr, slot.size);
+    std::istream in(&buf);
+
+    return Serializer::readRow(in, schema);
+}
+
+
+std::vector<std::pair<RID, Row>> Storage::readAllRows(const std::string& tableName) {
+    std::vector<std::pair<RID, Row>> result;
+
+    const Schema& schema = schemas[tableName];
+
+    for (size_t p : tablePages[tableName]) {
+        auto& page = pager.getPage(p);
+
+        PageHeader header = getHeader(page);
+
+        for (uint16_t i = 0; i < header.numSlots; i++) {
+            Slot slot;
+            memcpy(&slot,
+                   page.data() + sizeof(PageHeader) + i * sizeof(Slot),
+                   sizeof(Slot));
+
+            if (slot.isDeleted) continue;
+
+            char* rowPtr = page.data() + slot.offset;
+
+            MemoryBuffer buf(rowPtr, slot.size);
+            std::istream in(&buf);
+
+            Row row = Serializer::readRow(in, schema);
+
+            result.push_back({RID(p, i), row});
+        }
+    }
 
     return result;
 }
-// ------------------ GET ------------------
+
+
+//-----DeleteRow---------
+
+void Storage::deleteRow(const RID& rid) {
+    auto& page = pager.getPage(rid.pageNum);
+
+    Slot slot;
+    memcpy(&slot,
+           page.data() + sizeof(PageHeader) + rid.slotIndex * sizeof(Slot),
+           sizeof(Slot));
+
+    slot.isDeleted = 1;
+
+    memcpy(page.data() + sizeof(PageHeader) + rid.slotIndex * sizeof(Slot),
+           &slot, sizeof(Slot));
+
+    pager.flush(rid.pageNum);
+}
+
+//-------------Update----------
+void Storage::updateRow(const RID& rid, const Row& newRow) {
+    auto& page = pager.getPage(rid.pageNum);
+
+    Slot slot;
+    memcpy(&slot,
+           page.data() + sizeof(PageHeader) + rid.slotIndex * sizeof(Slot),
+           sizeof(Slot));
+
+    if (slot.isDeleted) return;
+
+    std::vector<char> temp(PAGE_SIZE);
+    MemoryBuffer buf(temp.data(), temp.size());
+    std::ostream out(&buf);
+
+    Serializer::writeRow(out, newRow);
+
+    uint16_t newSize = static_cast<uint16_t>(out.tellp());
+
+    if (newSize <= slot.size) {
+        memcpy(page.data() + slot.offset, temp.data(), newSize);
+        slot.size = newSize;
+
+        memcpy(page.data() + sizeof(PageHeader) + rid.slotIndex * sizeof(Slot),
+               &slot, sizeof(Slot));
+
+        pager.flush(rid.pageNum);
+    } else {
+        deleteRow(rid);
+        insertRow("TODO_TABLE", newRow);
+    }
+}
+
+
+// ---------- DEBUG ----------
+
+void Storage::debugPager() {
+    size_t pageNum = pager.allocatePage();
+    auto& page = pager.getPage(pageNum);
+
+    std::string msg = "pager working";
+    memcpy(page.data(), msg.c_str(), msg.size());
+
+    pager.flush(pageNum);
+}
+
+
+
+// ---------- ACCESS ----------
 
 const std::unordered_map<std::string, Schema>& Storage::getSchemas() const {
     return schemas;
