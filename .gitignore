@@ -42,3 +42,7 @@
 
 #cmake build
 build/
+dist/
+
+#test database
+test.db

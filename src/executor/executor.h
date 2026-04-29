@@ -8,12 +8,15 @@
 #include "../common/value.h"
 #include "../parser/ast.h"
 #include "../storage/storage.h"
+#include "../index/index_manager.h"
 
 class Executor {
 private:
     std::unordered_map<std::string, Schema> schemas;
 
     Storage storage;
+    IndexManager indexManager;
+
     std::string db_path;
 
 public:
@@ -24,6 +27,7 @@ private:
     void handleCreate(const CreateQuery& q);
     void handleInsert(const InsertQuery& q);
     std::vector<Row> handleSelect(const SelectQuery& q);
+    void handleUpdate(const UpdateQuery& q);
     void handleDelete(const DeleteQuery& q);
 
     DataType parseDataType(const std::string& typeStr);

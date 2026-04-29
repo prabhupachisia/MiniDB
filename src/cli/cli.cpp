@@ -167,7 +167,7 @@ void CLI::executeQuery(const std::string& query) {
 
             current_db_path = dbFile;
             db_selected = true;
-            executor.execute(*parsedQuery);
+            executor.setDatabase(dbFile);
 
             std::cout << "[CLI] Using database: " << dbFile << "\n";
             return;

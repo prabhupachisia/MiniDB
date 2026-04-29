@@ -11,8 +11,6 @@ DataType parseType(const std::string& type) {
     throw std::runtime_error("Unknown data type: " + type);
 }
 
-
-
 // ------------------ MAIN EXECUTE ------------------
 
 
@@ -45,6 +43,9 @@ void Executor::execute(const Query& query) {
 
                 break;
             }
+            case QueryType::UPDATE:
+                handleUpdate(static_cast<const UpdateQuery&>(query));
+                break;
 
             case QueryType::DELETE:
                 handleDelete(static_cast<const DeleteQuery&>(query));
@@ -71,7 +72,8 @@ void Executor::setDatabase(const std::string& path) {
 
     storage.openDatabase(path);
 
-    storage.loadSchemas();
+    storage.loadMetadata();
+
     schemas = storage.getSchemas();
 }
 
@@ -90,7 +92,7 @@ void Executor::handleCreate(const CreateQuery& q) {
 
     for (const auto& col : q.columns) {
         if (seen.count(col.name)) {
-            throw std::runtime_error("Duplicate column: " + col.name);
+            throw std::runtime_error("Duplicate column");
         }
         seen.insert(col.name);
 
@@ -104,89 +106,129 @@ void Executor::handleCreate(const CreateQuery& q) {
         schema.columns.push_back(column);
     }
 
-    if (pkCount > 1) {
+    if (pkCount > 1)
         throw std::runtime_error("Multiple primary keys not allowed");
-    }
 
     schemas[q.table_name] = schema;
-
     storage.saveSchema(schema);
+    
 
-    std::cout << "[Executor] Table created: " << q.table_name << "\n";
+    for (const auto& col : schema.columns) {
+        if (col.isPrimaryKey && col.type == DataType::INT) {
+            indexManager.createIndex(q.table_name, col.name, IndexManager::PRIMARY);
+        }
+    }
+
+    std::cout << "[Executor] Table created\n";
 }
 // ------------------ INSERT ------------------
 
 void Executor::handleInsert(const InsertQuery& q) {
-    if (!schemas.count(q.table_name)) {
+    if (!schemas.count(q.table_name))
         throw std::runtime_error("Table not found");
-    }
 
     const Schema& schema = schemas[q.table_name];
 
-    if (q.values.size() != schema.columns.size()) {
+    if (q.values.size() != schema.columns.size())
         throw std::runtime_error("Column count mismatch");
-    }
 
     Row row;
 
-    for (size_t i = 0; i < q.values.size(); i++) {
+    for (int i = 0; i < q.values.size(); i++) {
         row.push_back(parseValue(q.values[i], schema.columns[i].type));
     }
 
     int pkIndex = schema.getPrimaryKeyIndex();
     if (pkIndex != -1) {
-        auto allRows = storage.readAllRows(q.table_name);
+        const auto& pkCol = schema.columns[pkIndex];
 
-        for (const auto& [rid, existingRow] : allRows) {
-            if (existingRow[pkIndex] == row[pkIndex]) {
+        if (pkCol.type == DataType::INT &&
+            indexManager.hasIndex(q.table_name, pkCol.name)) {
+
+            int key = row[pkIndex].asInt();
+
+            if (indexManager.search(q.table_name, pkCol.name, key)) {
                 throw std::runtime_error("Duplicate primary key");
             }
         }
     }
 
-    storage.insertRow(q.table_name, row);
+    RID rid = storage.insertRow(q.table_name, row);
 
-    std::cout << "[Executor] Row inserted into " << q.table_name << "\n";
+    for (int i = 0; i < schema.columns.size(); i++) {
+        const auto& col = schema.columns[i];
+
+        if (col.type == DataType::INT &&
+            indexManager.hasIndex(q.table_name, col.name)) {
+
+            indexManager.insert(
+                q.table_name,
+                col.name,
+                row[i].asInt(),
+                rid
+            );
+        }
+    }
+
+    std::cout << "[Executor] Row inserted\n";
 }
 
 // ------------------ SELECT ------------------
 
 std::vector<Row> Executor::handleSelect(const SelectQuery& q) {
-    if (!schemas.count(q.table_name)) {
+    if (!schemas.count(q.table_name))
         throw std::runtime_error("Table not found");
-    }
 
     const Schema& schema = schemas[q.table_name];
+
+    // 🔥 INDEX OPTIMIZATION
+    if (q.has_where && q.where.op == "=" &&
+        indexManager.hasIndex(q.table_name, q.where.column)) {
+
+        int key = std::stoi(q.where.value);
+
+        auto rids = indexManager.searchAll(q.table_name, q.where.column, key);
+
+        if (rids.empty()) return {};
+
+        std::vector<Row> result;
+
+        for (const auto& rid : rids) {
+            Row row = storage.getRow(rid, q.table_name);
+
+            if (q.columns.size() == 1 && q.columns[0] == "*") {
+                result.push_back(row);
+            } else {
+                Row projected;
+                for (const auto& col : q.columns) {
+                    int idx = schema.getColumnIndex(col);
+                    projected.push_back(row[idx]);
+                }
+                result.push_back(projected);
+            }
+        }
+
+        return result;
+    }
 
     auto records = storage.readAllRows(q.table_name);
 
     std::vector<Row> result;
-
     bool selectAll = (q.columns.size() == 1 && q.columns[0] == "*");
-
-    std::vector<int> colIndexes;
-
-    if (!selectAll) {
-        for (const auto& colName : q.columns) {
-            colIndexes.push_back(schema.getColumnIndex(colName));
-        }
-    }
 
     for (const auto& [rid, row] : records) {
 
-        if (q.has_where && !matchCondition(row, schema, q.where)) {
+        if (q.has_where && !matchCondition(row, schema, q.where))
             continue;
-        }
 
         if (selectAll) {
             result.push_back(row);
         } else {
             Row projected;
-
-            for (int idx : colIndexes) {
+            for (const auto& col : q.columns) {
+                int idx = schema.getColumnIndex(col);
                 projected.push_back(row[idx]);
             }
-
             result.push_back(projected);
         }
     }
@@ -197,23 +239,75 @@ std::vector<Row> Executor::handleSelect(const SelectQuery& q) {
 // ------------------ DELETE ------------------
 
 void Executor::handleDelete(const DeleteQuery& q) {
-    if (!schemas.count(q.table_name)) {
+    if (!schemas.count(q.table_name))
         throw std::runtime_error("Table not found");
-    }
 
     const Schema& schema = schemas[q.table_name];
 
+    // 🔥 INDEX OPTIMIZED DELETE
+    if (q.has_where && q.where.op == "=" &&
+        indexManager.hasIndex(q.table_name, q.where.column)) {
+
+        int key = std::stoi(q.where.value);
+
+        auto rids = indexManager.searchAll(q.table_name, q.where.column, key);
+
+        for (const auto& rid : rids) {
+
+            Row row = storage.getRow(rid, q.table_name);
+
+            // remove from index
+            for (int i = 0; i < schema.columns.size(); i++) {
+                const auto& col = schema.columns[i];
+
+                if (col.type == DataType::INT &&
+                    indexManager.hasIndex(q.table_name, col.name)) {
+
+                    indexManager.remove(
+                        q.table_name,
+                        col.name,
+                        row[i].asInt(),
+                        rid
+                    );
+                }
+            }
+
+            storage.deleteRow(rid);
+        }
+
+        std::cout << "[Executor] Rows deleted\n";
+        return;
+    }
+
+    // 🔁 FALLBACK SCAN
     auto records = storage.readAllRows(q.table_name);
 
     for (const auto& [rid, row] : records) {
 
         if (!q.has_where || matchCondition(row, schema, q.where)) {
+
+            for (int i = 0; i < schema.columns.size(); i++) {
+                const auto& col = schema.columns[i];
+
+                if (col.type == DataType::INT &&
+                    indexManager.hasIndex(q.table_name, col.name)) {
+
+                    indexManager.remove(
+                        q.table_name,
+                        col.name,
+                        row[i].asInt(),
+                        rid
+                    );
+                }
+            }
+
             storage.deleteRow(rid);
         }
     }
 
-    std::cout << "[Executor] Rows deleted from " << q.table_name << "\n";
+    std::cout << "[Executor] Rows deleted\n";
 }
+
 
 DataType Executor::parseDataType(const std::string& typeStr) {
     std::string t = typeStr;
@@ -237,14 +331,7 @@ Value Executor::parseValue(const std::string& valStr, DataType expectedType) {
     }
 
     if (expectedType == DataType::TEXT) {
-        if (valStr.size() >= 2 &&
-            valStr.front() == '\'' &&
-            valStr.back() == '\'') {
-
-            return Value(valStr.substr(1, valStr.size() - 2));
-        }
-
-        throw std::runtime_error("TEXT must be in quotes: " + valStr);
+        return Value(valStr);
     }
 
     throw std::runtime_error("Invalid value type");
@@ -267,3 +354,89 @@ bool Executor::matchCondition(
     return row[colIndex] == rhs;
 }
 
+void Executor::handleUpdate(const UpdateQuery& q) {
+    if (!schemas.count(q.table_name))
+        throw std::runtime_error("Table not found");
+
+    const Schema& schema = schemas[q.table_name];
+
+    int updateColIdx = schema.getColumnIndex(q.column);
+    DataType updateType = schema.columns[updateColIdx].type;
+
+    Value newValue = parseValue(q.value, updateType);
+
+    if (q.has_where && q.where.op == "=") {
+
+        int whereIdx = schema.getColumnIndex(q.where.column);
+
+        // only use index if INT + index exists
+        if (schema.columns[whereIdx].type == DataType::INT &&
+            indexManager.hasIndex(q.table_name, q.where.column)) {
+
+            int key;
+            try {
+                key = std::stoi(q.where.value);
+            } catch (...) {
+                throw std::runtime_error("Invalid WHERE value");
+            }
+
+            auto rids = indexManager.searchAll(q.table_name, q.where.column, key);
+
+            for (const auto& rid : rids) {
+
+                Row row = storage.getRow(rid, q.table_name);
+
+                Value oldValue = row[updateColIdx];
+
+                if (schema.columns[updateColIdx].type == DataType::INT &&
+                    indexManager.hasIndex(q.table_name, q.column)) {
+
+                    indexManager.update(
+                        q.table_name,
+                        q.column,
+                        oldValue.asInt(),
+                        newValue.asInt(),
+                        rid
+                    );
+                }
+
+                row[updateColIdx] = newValue;
+
+                storage.updateRow(rid, row, q.table_name);
+            }
+
+            std::cout << "[Executor] Rows updated\n";
+            return;
+        }
+    }
+    auto records = storage.readAllRows(q.table_name);
+
+    for (const auto& [rid, rowOrig] : records) {
+
+        if (!q.has_where || matchCondition(rowOrig, schema, q.where)) {
+
+            Row row = rowOrig;
+
+            Value oldValue = row[updateColIdx];
+
+            // update index if needed
+            if (schema.columns[updateColIdx].type == DataType::INT &&
+                indexManager.hasIndex(q.table_name, q.column)) {
+
+                indexManager.update(
+                    q.table_name,
+                    q.column,
+                    oldValue.asInt(),
+                    newValue.asInt(),
+                    rid
+                );
+            }
+
+            row[updateColIdx] = newValue;
+
+            storage.updateRow(rid, row, q.table_name);
+        }
+    }
+
+    std::cout << "[Executor] Rows updated\n";
+}

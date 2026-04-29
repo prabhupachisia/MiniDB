@@ -8,7 +8,8 @@ enum class QueryType {
     INSERT,
     SELECT,
     DELETE,
-    USE
+    USE,
+    UPDATE
 };
 
 struct Query {
@@ -51,6 +52,14 @@ struct InsertQuery : Query {
     std::vector<std::string> values;
 
     InsertQuery() : Query(QueryType::INSERT) {}
+};
+
+struct UpdateQuery : Query {
+    std::string table_name;
+    std::string column;
+    std::string value;
+    bool has_where;
+    Condition where;
 };
 
 struct SelectQuery : Query {

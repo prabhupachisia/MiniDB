@@ -1,46 +1,154 @@
 #include "storage.h"
 #include "serializer.h"
 #include "pager/page_utils.h"
+#include "memory_stream_write.h"
 #include "memory_stream.h"
 #include <iostream>
 #include <cstring>
+#include <sstream>
 
 void Storage::openDatabase(const std::string& path) {
     dbPath = path;
-
     pager.open(path);
 
     if (pager.getPageCount() == 0) {
         initNewDatabase();
+        saveMetadata();
     } else {
-        readHeader();
-        loadSchemas();
+        loadMetadata();
     }
 }
 
 // ---------- INIT ----------
 
 void Storage::initNewDatabase() {
-    size_t pageNum = pager.allocatePage();
+    size_t pageNum = pager.allocatePage(); // page 0
     auto& page = pager.getPage(pageNum);
 
-    PageHeader header;
-    header.numSlots = 0;
-    header.freeSpaceOffset = PAGE_SIZE;
-
-    setHeader(page, header);
+    memset(page.data(), 0, PAGE_SIZE);
 
     pager.flush(pageNum);
 }
 
-void Storage::readHeader() {
-    if (pager.getPageCount() == 0) return;
-
+void Storage::saveMetadata() {
     auto& page = pager.getPage(META_PAGE);
 
-    PageHeader header = getHeader(page);
+    std::vector<char> buffer(PAGE_SIZE, 0);
 
-    // future use (schema, metadata)
+    size_t offset = 0;
+
+    auto writeInt = [&](int x) {
+        memcpy(buffer.data() + offset, &x, sizeof(int));
+        offset += sizeof(int);
+    };
+
+    auto writeString = [&](const std::string& s) {
+        int len = s.size();
+        writeInt(len);
+        memcpy(buffer.data() + offset, s.data(), len);
+        offset += len;
+    };
+
+    // ---- header ----
+    writeInt(0xDBDB);
+    writeInt(1);
+
+    // ---- schemas ----
+    writeInt(schemas.size());
+
+    for (auto& [name, schema] : schemas) {
+        std::stringstream ss;
+        Serializer::writeSchema(ss, schema);
+        std::string data = ss.str();
+
+        writeInt(data.size());
+        memcpy(buffer.data() + offset, data.data(), data.size());
+        offset += data.size();
+    }
+
+    // ---- tablePages ----
+    writeInt(tablePages.size());
+
+    for (auto& [table, pages] : tablePages) {
+        writeString(table);
+        writeInt(pages.size());
+
+        for (auto p : pages)
+            writeInt(p);
+    }
+
+    if (offset > PAGE_SIZE)
+        throw std::runtime_error("Metadata overflow");
+
+    memcpy(page.data(), buffer.data(), PAGE_SIZE);
+    pager.flush(META_PAGE);
+}
+
+void Storage::loadMetadata() {
+    auto& page = pager.getPage(META_PAGE);
+
+    size_t offset = 0;
+
+    auto readInt = [&](int& x) {
+        memcpy(&x, page.data() + offset, sizeof(int));
+        offset += sizeof(int);
+    };
+
+    auto readString = [&](std::string& s) {
+        int len;
+        readInt(len);
+        s.assign(page.data() + offset, len);
+        offset += len;
+    };
+
+    schemas.clear();
+    tablePages.clear();
+
+    int magic, version;
+    readInt(magic);
+    readInt(version);
+
+    if (magic != 0xDBDB)
+        throw std::runtime_error("Invalid DB");
+
+    // ---- schemas ----
+    int schemaCount;
+    readInt(schemaCount);
+
+    for (int i = 0; i < schemaCount; i++) {
+        int size;
+        readInt(size);
+
+        std::string data(page.data() + offset, size);
+        offset += size;
+
+        std::stringstream ss(data);
+        Schema s = Serializer::readSchema(ss);
+
+        schemas[s.tableName] = s;
+    }
+
+    // ---- tablePages ----
+    int tableCount;
+    readInt(tableCount);
+
+    for (int i = 0; i < tableCount; i++) {
+        std::string table;
+        readString(table);
+
+        int count;
+        readInt(count);
+
+        std::vector<size_t> pages;
+
+        for (int j = 0; j < count; j++) {
+            int p;
+            readInt(p);
+            pages.push_back(p);
+        }
+
+        tablePages[table] = pages;
+    }
 }
 
 // ---------- SCHEMA (TEMP STUB) ----------
@@ -49,10 +157,6 @@ void Storage::saveSchema(const Schema& schema) {
     schemas[schema.tableName] = schema;
 
     tablePages[schema.tableName] = {};
-}
-
-void Storage::loadSchemas() {
-    // TODO: load from META_PAGE later
 }
 
 // ---------- PAGE HELPERS ----------
@@ -88,22 +192,51 @@ size_t Storage::allocateNewDataPage(const std::string& tableName) {
 // ---------- INSERT ----------
 
 RID Storage::insertRow(const std::string& tableName, const Row& row) {
+    validateTable(tableName);
     const Schema& schema = schemas[tableName];
+
+    if (row.size() != schemas[tableName].columns.size()) {
+        throw std::runtime_error("Invalid row size");
+    }
 
     size_t pageNum = getLastDataPage(tableName);
     auto& page = pager.getPage(pageNum);
 
     PageHeader header = getHeader(page);
 
+    // ---- serialize row ----
     std::vector<char> temp(PAGE_SIZE);
+
     MemoryBuffer buf(temp.data(), temp.size());
     std::ostream out(&buf);
 
     Serializer::writeRow(out, row);
 
     uint16_t rowSize = static_cast<uint16_t>(out.tellp());
-    uint16_t slotSize = sizeof(Slot);
 
+    for (uint16_t i = 0; i < header.numSlots; i++) {
+        Slot slot;
+        memcpy(&slot,
+               page.data() + sizeof(PageHeader) + i * sizeof(Slot),
+               sizeof(Slot));
+
+        if (slot.isDeleted && slot.size >= rowSize) {
+            // reuse slot
+            memcpy(page.data() + slot.offset, temp.data(), rowSize);
+
+            slot.size = rowSize;
+            slot.isDeleted = 0;
+
+            memcpy(page.data() + sizeof(PageHeader) + i * sizeof(Slot),
+                   &slot, sizeof(Slot));
+
+            pager.flush(pageNum);
+
+            return RID(pageNum, i);
+        }
+    }
+
+    uint16_t slotSize = sizeof(Slot);
     uint16_t slotStart = sizeof(PageHeader) + header.numSlots * sizeof(Slot);
 
     if (header.freeSpaceOffset - slotStart < rowSize + slotSize) {
@@ -111,7 +244,7 @@ RID Storage::insertRow(const std::string& tableName, const Row& row) {
         return insertRow(tableName, row);
     }
 
-    // write row
+    // write row at bottom
     header.freeSpaceOffset -= rowSize;
     uint16_t rowOffset = header.freeSpaceOffset;
 
@@ -138,7 +271,11 @@ RID Storage::insertRow(const std::string& tableName, const Row& row) {
 
 //----------READ-----------
 
-Row Storage::getRow(const RID& rid) {
+Row Storage::getRow(const RID& rid, const std::string& tableName) {
+    validateTable(tableName);
+
+    const Schema& schema = schemas[tableName];
+
     auto& page = pager.getPage(rid.pageNum);
 
     Slot slot;
@@ -147,8 +284,6 @@ Row Storage::getRow(const RID& rid) {
            sizeof(Slot));
 
     if (slot.isDeleted) return {};
-
-    const Schema& schema = schemas.begin()->second; // temp (fix later per table)
 
     char* rowPtr = page.data() + slot.offset;
 
@@ -161,6 +296,10 @@ Row Storage::getRow(const RID& rid) {
 
 std::vector<std::pair<RID, Row>> Storage::readAllRows(const std::string& tableName) {
     std::vector<std::pair<RID, Row>> result;
+
+    if (!schemas.count(tableName)) {
+        throw std::runtime_error("Table not found");
+    }
 
     const Schema& schema = schemas[tableName];
 
@@ -211,7 +350,10 @@ void Storage::deleteRow(const RID& rid) {
 }
 
 //-------------Update----------
-void Storage::updateRow(const RID& rid, const Row& newRow) {
+void Storage::updateRow(const RID& rid, const Row& newRow, const std::string& tableName) {
+
+    validateTable(tableName);
+
     auto& page = pager.getPage(rid.pageNum);
 
     Slot slot;
@@ -239,27 +381,20 @@ void Storage::updateRow(const RID& rid, const Row& newRow) {
         pager.flush(rid.pageNum);
     } else {
         deleteRow(rid);
-        insertRow("TODO_TABLE", newRow);
+        insertRow(tableName, newRow);
     }
 }
-
-
-// ---------- DEBUG ----------
-
-void Storage::debugPager() {
-    size_t pageNum = pager.allocatePage();
-    auto& page = pager.getPage(pageNum);
-
-    std::string msg = "pager working";
-    memcpy(page.data(), msg.c_str(), msg.size());
-
-    pager.flush(pageNum);
-}
-
 
 
 // ---------- ACCESS ----------
 
 const std::unordered_map<std::string, Schema>& Storage::getSchemas() const {
     return schemas;
+}
+
+//---------HELPER-------
+void Storage::validateTable(const std::string& tableName) {
+    if (!schemas.count(tableName)) {
+        throw std::runtime_error("Table not found: " + tableName);
+    }
 }

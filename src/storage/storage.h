@@ -17,10 +17,12 @@ private:
 
     std::unordered_map<std::string, Schema> schemas;
 
+    std::unordered_map<std::string, std::vector<size_t>> tablePages;
+
     static constexpr size_t META_PAGE = 0;
 
     void initNewDatabase();
-    void readHeader();
+    void validateTable(const std::string &tableName);
 
     size_t getLastDataPage(const std::string& tableName);
     size_t allocateNewDataPage(const std::string& tableName);
@@ -28,17 +30,22 @@ private:
 public:
     void openDatabase(const std::string& path);
 
+    // metadata
+    void saveMetadata();
+    void loadMetadata();
+
     void saveSchema(const Schema& schema);
-    void loadSchemas();
 
+    // data
     RID insertRow(const std::string& tableName, const Row& row);
-    Row getRow(const RID& rid);
-    std::vector<std::pair<RID, Row>> readAllRows(const std::string& tableName);
-    void updateRow(const RID& rid, const Row& newRow);
-    void deleteRow(const RID& rid);
-    std::unordered_map<std::string, std::vector<size_t>> tablePages;
 
-    void debugPager();
+    Row getRow(const RID& rid, const std::string& tableName);
+
+    void deleteRow(const RID& rid);
+
+    void updateRow(const RID& rid, const Row& newRow, const std::string& tableName);
+
+    std::vector<std::pair<RID, Row>> readAllRows(const std::string& tableName);
 
     const std::unordered_map<std::string, Schema>& getSchemas() const;
 };
