@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include "../index/bptree.h"
+#include "../storage/pager/pager.h"
 
 class IndexManager {
 public:
@@ -16,56 +17,40 @@ private:
     struct Index {
         IndexType type;
         std::unique_ptr<BPlusTree> tree;
+        size_t rootPage;  // 🔥 persistence hook
     };
 
-    // table → column → index
     std::unordered_map<
         std::string,
         std::unordered_map<std::string, Index>
     > indexes;
 
+    Pager* pager;
+
 public:
-    // create index
+    IndexManager(Pager* pager);
+
     void createIndex(const std::string& table,
                      const std::string& column,
                      IndexType type);
 
-    // insert
     void insert(const std::string& table,
                 const std::string& column,
                 int key,
                 RID rid);
 
-    // delete
-    void remove(const std::string& table,
-                const std::string& column,
-                int key,
-                RID rid);
+    void persistIndexMeta(const std::string& table,
+                                    const std::string& column,
+                                    size_t rootPage,
+                                    IndexType type);
 
-    // update
-    void update(const std::string& table,
-                const std::string& column,
-                int oldKey,
-                int newKey,
-                RID rid);
-
-    // search primary
     std::optional<RID> search(const std::string& table,
                               const std::string& column,
                               int key);
 
-    // search secondary
-    std::vector<RID> searchAll(const std::string& table,
-                              const std::string& column,
-                              int key);
+    void loadIndexesFromMeta();
 
-    // range
-    std::vector<RID> rangeSearch(const std::string& table,
-                                const std::string& column,
-                                int left,
-                                int right);
-
-    // helper
-    bool hasIndex(const std::string& table,
-                  const std::string& column);
+    void IndexManager::updateRootPage(const std::string& table,
+                                  const std::string& column,
+                                  size_t newRootPage);
 };

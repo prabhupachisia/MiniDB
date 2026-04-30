@@ -1,26 +1,144 @@
 #include "bptree.h"
+#include <cstring>
 
-Node::Node(bool leaf) {
-    isLeaf = leaf;
-    next = nullptr;
+// ===== Helpers =====
+
+static BPTreeHeader getHeader(std::vector<char>& page) {
+    BPTreeHeader h;
+    memcpy(&h, page.data(), sizeof(h));
+    return h;
 }
 
-BPlusTree::BPlusTree(bool allowDuplicates) {
-    root = new Node(true);
-    this->allowDuplicates = allowDuplicates;
+static void setHeader(std::vector<char>& page, const BPTreeHeader& h) {
+    memcpy(page.data(), &h, sizeof(h));
 }
 
-Node* BPlusTree::findLeaf(int key) {
-    Node* curr = root;
+static int* getKeys(std::vector<char>& page) {
+    return reinterpret_cast<int*>(page.data() + sizeof(BPTreeHeader));
+}
 
-    while (!curr->isLeaf) {
-        int i = 0;
-        while (i < curr->keys.size() && key >= curr->keys[i]) i++;
-        curr = curr->children[i];
+static char* getDataStart(std::vector<char>& page, int numKeys) {
+    return page.data() + sizeof(BPTreeHeader) + numKeys * sizeof(int);
+}
+
+// ===== Constructors =====
+
+BPlusTree::BPlusTree(Pager* pager, bool allowDuplicates)
+    : pager(pager), allowDuplicates(allowDuplicates) {
+
+    rootPage = pager->allocatePage();
+    onRootChange = nullptr;
+    initLeaf(rootPage);
+}
+
+BPlusTree::BPlusTree(Pager* pager, size_t rootPage, bool allowDuplicates)
+    : pager(pager), rootPage(rootPage), allowDuplicates(allowDuplicates) {}
+
+// ===== Getter =====
+
+size_t BPlusTree::getRootPage() const {
+    return rootPage;
+}
+
+// ===== Init Leaf =====
+
+void BPlusTree::initLeaf(size_t pageNum) {
+    auto& page = pager->getPage(pageNum);
+
+    BPTreeHeader h{};
+    h.isLeaf = 1;
+    h.numKeys = 0;
+    h.nextLeaf = 0;
+
+    setHeader(page, h);
+    pager->flush(pageNum);
+}
+
+// ===== Find Leaf (only root for now) =====
+
+size_t BPlusTree::findLeaf(int key) {
+    return rootPage;
+}
+
+// ===== Insert =====
+
+void BPlusTree::insert(int key, RID rid) {
+    auto leaf = findLeaf(key);
+    insertIntoLeaf(leaf, key, rid);
+
+    auto& page = pager->getPage(leaf);
+    auto header = getHeader(page);
+
+    if (header.numKeys >= ORDER) {
+        splitLeaf(leaf);
+    }
+}
+
+// ===== Insert Into Leaf =====
+
+void BPlusTree::insertIntoLeaf(size_t pageNum, int key, RID rid) {
+    auto& page = pager->getPage(pageNum);
+    auto header = getHeader(page);
+
+    int* keys = getKeys(page);
+
+    int i = 0;
+    while (i < header.numKeys && keys[i] < key) i++;
+
+    // shift keys
+    for (int j = header.numKeys; j > i; j--) {
+        keys[j] = keys[j - 1];
     }
 
-    return curr;
+    keys[i] = key;
+
+    // store RID
+    char* data = getDataStart(page, header.numKeys + 1);
+
+    memcpy(data + i * sizeof(RID), &rid, sizeof(RID));
+
+    header.numKeys++;
+    setHeader(page, header);
+
+    pager->flush(pageNum);
 }
+
+// ===== Split Leaf =====
+
+void BPlusTree::splitLeaf(size_t pageNum) {
+    auto& page = pager->getPage(pageNum);
+    auto header = getHeader(page);
+
+    int* keys = getKeys(page);
+
+    size_t newPage = pager->allocatePage();
+    initLeaf(newPage);
+
+    auto& newPageRef = pager->getPage(newPage);
+    auto newHeader = getHeader(newPageRef);
+
+    int mid = header.numKeys / 2;
+
+    int* newKeys = getKeys(newPageRef);
+
+    for (int i = mid; i < header.numKeys; i++) {
+        newKeys[i - mid] = keys[i];
+    }
+
+    newHeader.numKeys = header.numKeys - mid;
+    header.numKeys = mid;
+
+    newHeader.nextLeaf = header.nextLeaf;
+    header.nextLeaf = newPage;
+
+    setHeader(page, header);
+    setHeader(newPageRef, newHeader);
+
+    pager->flush(pageNum);
+    pager->flush(newPage);
+}
+
+// ===== Search =====
 
 std::optional<RID> BPlusTree::search(int key) {
     auto res = searchAll(key);
@@ -28,159 +146,51 @@ std::optional<RID> BPlusTree::search(int key) {
     return std::nullopt;
 }
 
+// ===== SearchAll =====
+
 std::vector<RID> BPlusTree::searchAll(int key) {
-    Node* leaf = findLeaf(key);
+    std::vector<RID> result;
 
-    for (int i = 0; i < leaf->keys.size(); i++) {
-        if (leaf->keys[i] == key)
-            return leaf->values[i];
-    }
+    auto& page = pager->getPage(rootPage);
+    auto header = getHeader(page);
 
-    return {};
-}
+    int* keys = getKeys(page);
+    char* data = getDataStart(page, header.numKeys);
 
-void BPlusTree::insert(int key, RID rid) {
-    if (!allowDuplicates && search(key)) {
-        throw std::runtime_error("Duplicate key");
-    }
-
-    auto result = insertRecursive(root, key, rid);
-
-    if (result) {
-        Node* newRoot = new Node(false);
-        newRoot->keys.push_back(result->key);
-        newRoot->children.push_back(root);
-        newRoot->children.push_back(result->rightChild);
-        root = newRoot;
-    }
-}
-
-std::optional<SplitResult> BPlusTree::insertRecursive(Node* node, int key, RID rid) {
-    if (node->isLeaf) {
-        int i = 0;
-        while (i < node->keys.size() && node->keys[i] < key) i++;
-
-        // existing key (secondary index)
-        if (i < node->keys.size() && node->keys[i] == key) {
-            node->values[i].push_back(rid);
-            return std::nullopt;
-        }
-
-        node->keys.insert(node->keys.begin() + i, key);
-        node->values.insert(node->values.begin() + i, std::vector<RID>{rid});
-
-        if (node->keys.size() < ORDER)
-            return std::nullopt;
-
-        // split leaf
-        Node* newLeaf = new Node(true);
-        int mid = ORDER / 2;
-
-        newLeaf->keys.assign(node->keys.begin() + mid, node->keys.end());
-        newLeaf->values.assign(node->values.begin() + mid, node->values.end());
-
-        node->keys.resize(mid);
-        node->values.resize(mid);
-
-        newLeaf->next = node->next;
-        node->next = newLeaf;
-
-        return SplitResult{newLeaf->keys[0], newLeaf};
-    }
-
-    // internal node
-    int i = 0;
-    while (i < node->keys.size() && key >= node->keys[i]) i++;
-
-    auto childSplit = insertRecursive(node->children[i], key, rid);
-
-    if (!childSplit)
-        return std::nullopt;
-
-    node->keys.insert(node->keys.begin() + i, childSplit->key);
-    node->children.insert(node->children.begin() + i + 1, childSplit->rightChild);
-
-    if (node->keys.size() < ORDER)
-        return std::nullopt;
-
-    // split internal
-    Node* newInternal = new Node(false);
-    int mid = ORDER / 2;
-
-    int promoteKey = node->keys[mid];
-
-    newInternal->keys.assign(node->keys.begin() + mid + 1, node->keys.end());
-    newInternal->children.assign(node->children.begin() + mid + 1, node->children.end());
-
-    node->keys.resize(mid);
-    node->children.resize(mid + 1);
-
-    return SplitResult{promoteKey, newInternal};
-}
-
-bool BPlusTree::remove(int key, RID rid) {
-    Node* leaf = findLeaf(key);
-
-    for (int i = 0; i < leaf->keys.size(); i++) {
-        if (leaf->keys[i] == key) {
-
-            auto& vec = leaf->values[i];
-
-            for (int j = 0; j < vec.size(); j++) {
-                if (vec[j].pageNum == rid.pageNum &&
-                    vec[j].slotIndex == rid.slotIndex) {
-
-                    vec.erase(vec.begin() + j);
-
-                    // remove key if empty
-                    if (vec.empty()) {
-                        leaf->keys.erase(leaf->keys.begin() + i);
-                        leaf->values.erase(leaf->values.begin() + i);
-                    }
-
-                    return true;
-                }
-            }
+    for (int i = 0; i < header.numKeys; i++) {
+        if (keys[i] == key) {
+            RID rid;
+            memcpy(&rid, data + i * sizeof(RID), sizeof(RID));
+            result.push_back(rid);
         }
     }
 
-    return false;
+    return result;
 }
 
-bool BPlusTree::update(int oldKey, int newKey, RID rid) {
-    auto existing = searchAll(oldKey);
-    if (existing.empty())
-        return false;
-
-    if (!allowDuplicates && oldKey != newKey && search(newKey)) {
-        throw std::runtime_error("Duplicate key");
-    }
-
-    if (oldKey == newKey)
-        return true;
-
-    remove(oldKey, rid);
-    insert(newKey, rid);
-
-    return true;
-}
+// ===== Range =====
 
 std::vector<RID> BPlusTree::rangeSearch(int left, int right) {
     std::vector<RID> result;
 
-    Node* curr = findLeaf(left);
+    size_t curr = rootPage;
 
-    while (curr) {
-        for (int i = 0; i < curr->keys.size(); i++) {
-            if (curr->keys[i] >= left && curr->keys[i] <= right) {
-                for (auto& rid : curr->values[i])
-                    result.push_back(rid);
+    while (curr != 0) {
+        auto& page = pager->getPage(curr);
+        auto header = getHeader(page);
+
+        int* keys = getKeys(page);
+        char* data = getDataStart(page, header.numKeys);
+
+        for (int i = 0; i < header.numKeys; i++) {
+            if (keys[i] >= left && keys[i] <= right) {
+                RID rid;
+                memcpy(&rid, data + i * sizeof(RID), sizeof(RID));
+                result.push_back(rid);
             }
-
-            if (curr->keys[i] > right)
-                return result;
         }
-        curr = curr->next;
+
+        curr = header.nextLeaf;
     }
 
     return result;

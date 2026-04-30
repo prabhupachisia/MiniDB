@@ -2,6 +2,7 @@
 #include "serializer.h"
 #include "pager/page_utils.h"
 #include "memory_stream_write.h"
+#include "meta_page.h"
 #include "memory_stream.h"
 #include <iostream>
 #include <cstring>
@@ -22,10 +23,15 @@ void Storage::openDatabase(const std::string& path) {
 // ---------- INIT ----------
 
 void Storage::initNewDatabase() {
-    size_t pageNum = pager.allocatePage(); // page 0
+    size_t pageNum = pager.allocatePage(); // should be page 0
     auto& page = pager.getPage(pageNum);
 
-    memset(page.data(), 0, PAGE_SIZE);
+    // initialize structured meta
+    MetaPage meta{};
+    meta.numTables = 0;
+    meta.numIndexes = 0;
+
+    setMeta(page, meta);
 
     pager.flush(pageNum);
 }
@@ -87,76 +93,68 @@ void Storage::saveMetadata() {
 void Storage::loadMetadata() {
     auto& page = pager.getPage(META_PAGE);
 
-    size_t offset = 0;
-
-    auto readInt = [&](int& x) {
-        memcpy(&x, page.data() + offset, sizeof(int));
-        offset += sizeof(int);
-    };
-
-    auto readString = [&](std::string& s) {
-        int len;
-        readInt(len);
-        s.assign(page.data() + offset, len);
-        offset += len;
-    };
+    MetaPage meta = getMeta(page);
 
     schemas.clear();
     tablePages.clear();
 
-    int magic, version;
-    readInt(magic);
-    readInt(version);
+    // ---------- LOAD TABLES ----------
+    for (uint32_t i = 0; i < meta.numTables; i++) {
+        const TableMeta& t = meta.tables[i];
 
-    if (magic != 0xDBDB)
-        throw std::runtime_error("Invalid DB");
+        std::string tableName(t.tableName);
 
-    // ---- schemas ----
-    int schemaCount;
-    readInt(schemaCount);
+        // ⚠️ Schema reconstruction (simplified for now)
+        // You still need your Serializer if you want full schema info
+        Schema schema;
+        schema.tableName = tableName;
 
-    for (int i = 0; i < schemaCount; i++) {
-        int size;
-        readInt(size);
-
-        std::string data(page.data() + offset, size);
-        offset += size;
-
-        std::stringstream ss(data);
-        Schema s = Serializer::readSchema(ss);
-
-        schemas[s.tableName] = s;
-    }
-
-    // ---- tablePages ----
-    int tableCount;
-    readInt(tableCount);
-
-    for (int i = 0; i < tableCount; i++) {
-        std::string table;
-        readString(table);
-
-        int count;
-        readInt(count);
+        schemas[tableName] = schema;
 
         std::vector<size_t> pages;
-
-        for (int j = 0; j < count; j++) {
-            int p;
-            readInt(p);
-            pages.push_back(p);
+        for (uint32_t j = 0; j < t.numPages; j++) {
+            pages.push_back(t.pageIds[j]);
         }
 
-        tablePages[table] = pages;
+        tablePages[tableName] = pages;
     }
+
+    // ---------- NOTE ----------
+    // Index metadata will be loaded inside IndexManager
 }
 
 // ---------- SCHEMA (TEMP STUB) ----------
 
 void Storage::saveSchema(const Schema& schema) {
+    // -------- in-memory --------
     schemas[schema.tableName] = schema;
-
     tablePages[schema.tableName] = {};
+
+    // -------- meta page --------
+    auto& page = pager.getPage(META_PAGE);
+    MetaPage meta = getMeta(page);
+
+    // check duplicate table
+    for (uint32_t i = 0; i < meta.numTables; i++) {
+        if (std::string(meta.tables[i].tableName) == schema.tableName) {
+            throw std::runtime_error("Table already exists in meta");
+        }
+    }
+
+    TableMeta entry{};
+    
+    // safe copy
+    strncpy(entry.tableName, schema.tableName.c_str(), 31);
+    entry.tableName[31] = '\0';
+
+    entry.numPages = 0;
+
+    // add to meta
+    meta.tables[meta.numTables++] = entry;
+
+    // persist
+    setMeta(page, meta);
+    pager.flush(META_PAGE);
 }
 
 // ---------- PAGE HELPERS ----------

@@ -8,6 +8,7 @@
 #include "../common/value.h"
 #include "../parser/ast.h"
 #include "../storage/storage.h"
+#include "../storage/pager/pager.h"
 #include "../index/index_manager.h"
 
 class Executor {
@@ -16,6 +17,7 @@ private:
 
     Storage storage;
     IndexManager indexManager;
+    Pager pager;
 
     std::string db_path;
 

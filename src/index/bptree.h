@@ -2,58 +2,48 @@
 
 #include <vector>
 #include <optional>
-#include <stdexcept>
+#include <functional>
+#include "../storage/pager/pager.h"
 #include "../storage/rid.h"
 
 const int ORDER = 4;
 
-struct Node {
-    bool isLeaf;
-
-    std::vector<int> keys;
-
-    // internal nodes
-    std::vector<Node*> children;
-
-    // leaf nodes
-    std::vector<std::vector<RID>> values;
-
-    Node* next;
-
-    Node(bool leaf);
-};
-
-struct SplitResult {
-    int key;
-    Node* rightChild;
+struct BPTreeHeader {
+    uint8_t isLeaf;
+    uint16_t numKeys;
+    uint32_t nextLeaf;
 };
 
 class BPlusTree {
 private:
-    Node* root;
+    Pager* pager;
+    size_t rootPage;
     bool allowDuplicates;
 
-    Node* findLeaf(int key);
-    std::optional<SplitResult> insertRecursive(Node* node, int key, RID rid);
+    size_t findLeaf(int key);
+
+    void insertIntoLeaf(size_t pageNum, int key, RID rid);
+    void splitLeaf(size_t pageNum);
+
+    void initLeaf(size_t pageNum);
+
+    
+    std::function<void(size_t)> onRootChange;
 
 public:
-    BPlusTree(bool allowDuplicates = false);
+    // new tree
+    BPlusTree(Pager* pager, bool allowDuplicates = false);
 
-    // insert
+    // load existing tree
+    BPlusTree(Pager* pager, size_t rootPage, bool allowDuplicates);
+
+    size_t getRootPage() const;
+
     void insert(int key, RID rid);
 
-    // primary search
     std::optional<RID> search(int key);
-
-    // secondary search
     std::vector<RID> searchAll(int key);
 
-    // delete
-    bool remove(int key, RID rid);
-
-    // update
-    bool update(int oldKey, int newKey, RID rid);
-
-    // range query
     std::vector<RID> rangeSearch(int left, int right);
+
 };
