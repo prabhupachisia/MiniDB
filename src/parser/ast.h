@@ -58,8 +58,10 @@ struct UpdateQuery : Query {
     std::string table_name;
     std::string column;
     std::string value;
-    bool has_where;
+    bool has_where = false;
     Condition where;
+
+    UpdateQuery() : Query(QueryType::UPDATE) {}
 };
 
 struct SelectQuery : Query {

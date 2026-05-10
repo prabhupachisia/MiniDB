@@ -14,7 +14,6 @@ void Storage::openDatabase(const std::string& path) {
 
     if (pager.getPageCount() == 0) {
         initNewDatabase();
-        saveMetadata();
     } else {
         loadMetadata();
     }
@@ -210,7 +209,7 @@ RID Storage::insertRow(const std::string& tableName, const Row& row) {
 
     Serializer::writeRow(out, row);
 
-    uint16_t rowSize = static_cast<uint16_t>(out.tellp());
+    uint16_t rowSize = static_cast<uint16_t>(buf.bytesWritten());
 
     for (uint16_t i = 0; i < header.numSlots; i++) {
         Slot slot;
@@ -367,7 +366,7 @@ void Storage::updateRow(const RID& rid, const Row& newRow, const std::string& ta
 
     Serializer::writeRow(out, newRow);
 
-    uint16_t newSize = static_cast<uint16_t>(out.tellp());
+    uint16_t newSize = static_cast<uint16_t>(buf.bytesWritten());
 
     if (newSize <= slot.size) {
         memcpy(page.data() + slot.offset, temp.data(), newSize);
@@ -388,6 +387,10 @@ void Storage::updateRow(const RID& rid, const Row& newRow, const std::string& ta
 
 const std::unordered_map<std::string, Schema>& Storage::getSchemas() const {
     return schemas;
+}
+
+Pager* Storage::getPager() {
+    return &pager;
 }
 
 //---------HELPER-------

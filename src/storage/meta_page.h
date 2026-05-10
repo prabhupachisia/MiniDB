@@ -4,8 +4,8 @@
 #include <cstring>
 #include <vector>
 
-constexpr int MAX_TABLES = 20;
-constexpr int MAX_INDEXES = 50;
+constexpr int MAX_TABLES = 5;
+constexpr int MAX_INDEXES = 10;
 
 // ---------- TABLE METADATA ----------
 struct TableMeta {

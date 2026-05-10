@@ -50,6 +50,8 @@ Token Tokenizer:: readIdentifier(){
     else if(upper=="KEY") return {TokenType::KEY, value};
     else if(upper=="INDEX") return {TokenType::INDEX, value};
     else if (upper == "USE") return {TokenType::USE, value};
+    else if (upper == "UPDATE") return {TokenType::UPDATE, value};
+    else if (upper == "SET") return {TokenType::SET, value};
 
     return {TokenType::IDENTIFIER,value};
 }

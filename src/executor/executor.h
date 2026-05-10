@@ -17,11 +17,12 @@ private:
 
     Storage storage;
     IndexManager indexManager;
-    Pager pager;
 
     std::string db_path;
 
 public:
+    Executor();
+
     void setDatabase(const std::string& path);
     void execute(const Query& query);
 

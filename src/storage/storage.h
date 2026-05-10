@@ -48,4 +48,6 @@ public:
     std::vector<std::pair<RID, Row>> readAllRows(const std::string& tableName);
 
     const std::unordered_map<std::string, Schema>& getSchemas() const;
+
+    Pager* getPager();
 };

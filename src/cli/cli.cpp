@@ -120,6 +120,22 @@ void CLI::printQuery(Query* q) {
             break;
         }
 
+        case QueryType::UPDATE: {
+            auto* uq = static_cast<UpdateQuery*>(q);
+
+            std::cout << "UPDATE TABLE: " << uq->table_name << "\n";
+            std::cout << "SET: " << uq->column << " = " << uq->value << "\n";
+
+            if (uq->has_where) {
+                std::cout << "WHERE: "
+                          << uq->where.column << " "
+                          << uq->where.op << " "
+                          << uq->where.value << "\n";
+            }
+
+            break;
+        }
+
         case QueryType::USE: {
             auto* uq = static_cast<UseQuery*>(q);
             std::cout << "USE DATABASE: " << uq->db_name << "\n";

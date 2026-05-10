@@ -12,6 +12,7 @@ public:
         if (match(TokenType::INSERT)) return parseInsert();
         if (match(TokenType::SELECT)) return parseSelect();
         if (match(TokenType::DELETE)) return parseDelete();
+        if (match(TokenType::UPDATE)) return parseUpdate();
         if (match(TokenType::USE)) return parseUse();
 
         throw std::runtime_error("Unknown query type");
@@ -45,6 +46,18 @@ private:
         }
 
         throw std::runtime_error("Unexpected token");
+    }
+
+    Token consumeValue(const std::string& context) {
+        Token val = advance();
+
+        if (val.type != TokenType::NUMBER &&
+            val.type != TokenType::STRING &&
+            val.type != TokenType::IDENTIFIER) {
+            throw std::runtime_error("Invalid value in " + context);
+        }
+
+        return val;
     }
 
     // QUERY PARSERS
@@ -116,24 +129,12 @@ private:
         consume(TokenType::LPAREN);
 
         // First value
-        Token val = advance();
-        if (val.type != TokenType::NUMBER &&
-            val.type != TokenType::STRING &&
-            val.type != TokenType::IDENTIFIER) {
-            throw std::runtime_error("Invalid value in INSERT");
-        }
+        Token val = consumeValue("INSERT");
         query->values.push_back(val.value);
 
     // Remaining values
         while (match(TokenType::COMMA)) {
-            Token val = advance();
-
-            if (val.type != TokenType::NUMBER &&
-                val.type != TokenType::STRING &&
-                val.type != TokenType::IDENTIFIER) {
-                throw std::runtime_error("Invalid value in INSERT");
-            }
-
+            Token val = consumeValue("INSERT");
             query->values.push_back(val.value);
         }
 
@@ -183,19 +184,35 @@ private:
         return query;
     }
 
+    std::unique_ptr<Query> parseUpdate(){
+        auto query = std::make_unique<UpdateQuery>();
+
+        query->table_name = consume(TokenType::IDENTIFIER).value;
+
+        consume(TokenType::SET);
+        query->column = consume(TokenType::IDENTIFIER).value;
+        consume(TokenType::EQUAL);
+        query->value = consumeValue("UPDATE").value;
+
+        if(match(TokenType::WHERE)){
+            query->has_where = true;
+            query->where = parseCondition();
+        }
+
+        if (match(TokenType::SEMICOLON)) {
+            return query;
+        }
+
+        return query;
+    }
+
     // WHERE
     Condition parseCondition(){
         std::string column = consume(TokenType::IDENTIFIER).value;
 
         consume(TokenType::EQUAL);
 
-        Token val = advance();
-
-        if (val.type != TokenType::NUMBER &&
-            val.type != TokenType::STRING &&
-            val.type != TokenType::IDENTIFIER) {
-            throw std::runtime_error("Invalid WHERE value");
-        }
+        Token val = consumeValue("WHERE");
 
         return Condition(column, "=", val.value);
     }
