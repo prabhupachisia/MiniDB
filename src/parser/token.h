@@ -6,7 +6,7 @@ enum class TokenType{
     //keywords
     CREATE, TABLE, INSERT, INTO, VALUES, SELECT,
     FROM, WHERE, DELETE, PRIMARY, KEY, INDEX, USE,
-    UPDATE, SET,
+    UPDATE, SET, COMMIT, DESCRIBE, DESC,
 
     //Symbols
     LPAREN,     // (

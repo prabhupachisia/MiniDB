@@ -9,6 +9,10 @@ Pager::~Pager() {
 }
 
 void Pager::open(const std::string& path) {
+    if (file.is_open()) {
+        close();
+    }
+
     db_path = path;
 
     file.open(path, std::ios::in | std::ios::out | std::ios::binary);
@@ -65,11 +69,13 @@ void Pager::flush(size_t pageNum) {
     file.flush();
 }
 
-void Pager::close() {
+void Pager::flushAll() {
     for (auto& [pageNum, _] : page_cache) {
         flush(pageNum);
     }
+}
 
+void Pager::close() {
     if (file.is_open()) {
         file.close();
     }

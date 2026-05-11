@@ -40,6 +40,7 @@ public:
     size_t getRootPage() const;
 
     void insert(int key, RID rid);
+    bool remove(int key, RID rid);
 
     std::optional<RID> search(int key);
     std::vector<RID> searchAll(int key);

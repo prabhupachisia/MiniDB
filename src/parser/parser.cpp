@@ -14,6 +14,8 @@ public:
         if (match(TokenType::DELETE)) return parseDelete();
         if (match(TokenType::UPDATE)) return parseUpdate();
         if (match(TokenType::USE)) return parseUse();
+        if (match(TokenType::COMMIT)) return parseCommit();
+        if (match(TokenType::DESCRIBE) || match(TokenType::DESC)) return parseDescribe();
 
         throw std::runtime_error("Unknown query type");
     }
@@ -229,6 +231,19 @@ private:
             throw std::runtime_error("Expected database path");
         }
 
+        return query;
+    }
+
+    std::unique_ptr<Query> parseCommit() {
+        auto query = std::make_unique<CommitQuery>();
+        match(TokenType::SEMICOLON);
+        return query;
+    }
+
+    std::unique_ptr<Query> parseDescribe() {
+        auto query = std::make_unique<DescribeQuery>();
+        query->table_name = consume(TokenType::IDENTIFIER).value;
+        match(TokenType::SEMICOLON);
         return query;
     }
 };

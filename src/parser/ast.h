@@ -9,7 +9,9 @@ enum class QueryType {
     SELECT,
     DELETE,
     USE,
-    UPDATE
+    UPDATE,
+    COMMIT,
+    DESCRIBE
 };
 
 struct Query {
@@ -87,4 +89,14 @@ struct UseQuery : Query {
     std::string db_name;
 
     UseQuery() : Query(QueryType::USE) {}
+};
+
+struct CommitQuery : Query {
+    CommitQuery() : Query(QueryType::COMMIT) {}
+};
+
+struct DescribeQuery : Query {
+    std::string table_name;
+
+    DescribeQuery() : Query(QueryType::DESCRIBE) {}
 };

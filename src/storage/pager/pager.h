@@ -31,6 +31,7 @@ class Pager{
         size_t getPageCount() const;
 
         void flush(size_t pageNum);
+        void flushAll();
 
         void close();
 };

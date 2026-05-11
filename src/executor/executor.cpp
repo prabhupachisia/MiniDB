@@ -18,10 +18,17 @@ void Executor::execute(const Query& query) {
                 handleInsert(static_cast<const InsertQuery&>(query));
                 break;
             case QueryType::SELECT: {
-                auto rows = handleSelect(static_cast<const SelectQuery&>(query));
+                const auto& selectQuery = static_cast<const SelectQuery&>(query);
+                auto rows = handleSelect(selectQuery);
+                auto columns = getSelectColumnNames(selectQuery);
+
+                for (const auto& col : columns) {
+                    std::cout << col << " ";
+                }
+                std::cout << "\n";
 
                 if (rows.empty()) {
-                    std::cout << "[Executor] No rows found\n";
+                    std::cout << "No rows found.\n";
                     return;
                 }
 
@@ -41,11 +48,18 @@ void Executor::execute(const Query& query) {
                 break;
             case QueryType::USE:
                 throw std::runtime_error("USE handled by CLI");
+            case QueryType::COMMIT:
+                commit();
+                std::cout << "Changes committed.\n";
+                break;
+            case QueryType::DESCRIBE:
+                handleDescribe(static_cast<const DescribeQuery&>(query));
+                break;
             default:
                 throw std::runtime_error("Unsupported query type");
         }
     } catch (const std::exception& e) {
-        std::cout << "[Executor ERROR] " << e.what() << "\n";
+        std::cout << "Error: " << e.what() << "\n";
     }
 }
 
@@ -54,6 +68,20 @@ void Executor::setDatabase(const std::string& path) {
 
     storage.openDatabase(path);
     schemas = storage.getSchemas();
+
+    indexManager.loadIndexesFromMeta();
+    for (const auto& index : storage.getIndexes()) {
+        indexManager.loadIndex(
+            index.tableName,
+            index.columnName,
+            toIndexType(index.type),
+            index.rootPage
+        );
+    }
+}
+
+void Executor::commit() {
+    storage.commit();
 }
 
 void Executor::handleCreate(const CreateQuery& q) {
@@ -92,7 +120,18 @@ void Executor::handleCreate(const CreateQuery& q) {
 
     for (const auto& col : schema.columns) {
         if (col.isPrimaryKey && col.type == DataType::INT) {
-            indexManager.createIndex(q.table_name, col.name, IndexManager::PRIMARY);
+            size_t rootPage = indexManager.createIndex(
+                q.table_name,
+                col.name,
+                IndexManager::PRIMARY
+            );
+
+            storage.saveIndex({
+                q.table_name,
+                col.name,
+                static_cast<int>(IndexManager::PRIMARY),
+                rootPage
+            });
         }
     }
 
@@ -101,10 +140,21 @@ void Executor::handleCreate(const CreateQuery& q) {
         if (schema.columns[colIndex].type != DataType::INT) {
             throw std::runtime_error("Only INT indexes are supported");
         }
-        indexManager.createIndex(q.table_name, idx.column, IndexManager::SECONDARY);
+        size_t rootPage = indexManager.createIndex(
+            q.table_name,
+            idx.column,
+            IndexManager::SECONDARY
+        );
+
+        storage.saveIndex({
+            q.table_name,
+            idx.column,
+            static_cast<int>(IndexManager::SECONDARY),
+            rootPage
+        });
     }
 
-    std::cout << "[Executor] Table created\n";
+    std::cout << "Table created.\n";
 }
 
 void Executor::handleInsert(const InsertQuery& q) {
@@ -134,15 +184,9 @@ void Executor::handleInsert(const InsertQuery& q) {
     }
 
     RID rid = storage.insertRow(q.table_name, row);
+    insertIndexesForRow(q.table_name, schema, row, rid);
 
-    for (size_t i = 0; i < schema.columns.size(); i++) {
-        const auto& col = schema.columns[i];
-        if (col.type == DataType::INT) {
-            indexManager.insert(q.table_name, col.name, row[i].asInt(), rid);
-        }
-    }
-
-    std::cout << "[Executor] Row inserted\n";
+    std::cout << "Row inserted.\n";
 }
 
 std::vector<Row> Executor::handleSelect(const SelectQuery& q) {
@@ -151,7 +195,26 @@ std::vector<Row> Executor::handleSelect(const SelectQuery& q) {
     }
 
     const Schema& schema = schemas[q.table_name];
-    auto records = storage.readAllRows(q.table_name);
+    std::vector<std::pair<RID, Row>> records;
+    bool usedIndex = false;
+
+    if (q.has_where && indexManager.hasIndex(q.table_name, q.where.column)) {
+        int colIndex = schema.getColumnIndex(q.where.column);
+        if (schema.columns[colIndex].type == DataType::INT && q.where.op == "=") {
+            usedIndex = true;
+            int key = parseValue(q.where.value, DataType::INT).asInt();
+            for (const auto& rid : indexManager.searchAll(q.table_name, q.where.column, key)) {
+                Row row = storage.getRow(rid, q.table_name);
+                if (!row.empty()) {
+                    records.push_back({rid, row});
+                }
+            }
+        }
+    }
+
+    if (!usedIndex) {
+        records = storage.readAllRows(q.table_name);
+    }
 
     std::vector<Row> result;
     bool selectAll = (q.columns.size() == 1 && q.columns[0] == "*");
@@ -186,11 +249,12 @@ void Executor::handleDelete(const DeleteQuery& q) {
 
     for (const auto& [rid, row] : records) {
         if (!q.has_where || matchCondition(row, schema, q.where)) {
+            removeIndexesForRow(q.table_name, schema, row, rid);
             storage.deleteRow(rid);
         }
     }
 
-    std::cout << "[Executor] Rows deleted\n";
+    std::cout << "Rows deleted.\n";
 }
 
 void Executor::handleUpdate(const UpdateQuery& q) {
@@ -223,14 +287,40 @@ void Executor::handleUpdate(const UpdateQuery& q) {
 
         Row row = rowOrig;
         row[updateColIdx] = newValue;
-        storage.updateRow(rid, row, q.table_name);
-
-        if (schema.columns[updateColIdx].type == DataType::INT) {
-            indexManager.insert(q.table_name, q.column, newValue.asInt(), rid);
-        }
+        removeIndexesForRow(q.table_name, schema, rowOrig, rid);
+        RID newRid = storage.updateRow(rid, row, q.table_name);
+        insertIndexesForRow(q.table_name, schema, row, newRid);
     }
 
-    std::cout << "[Executor] Rows updated\n";
+    std::cout << "Rows updated.\n";
+}
+
+void Executor::handleDescribe(const DescribeQuery& q) {
+    if (!schemas.count(q.table_name)) {
+        throw std::runtime_error("Table not found");
+    }
+
+    const Schema& schema = schemas[q.table_name];
+
+    std::cout << "Column Type Key Index\n";
+    for (const auto& col : schema.columns) {
+        std::string indexType = "-";
+        for (const auto& index : storage.getIndexes()) {
+            if (index.tableName == q.table_name &&
+                index.columnName == col.name) {
+                indexType = toIndexType(index.type) == IndexManager::PRIMARY
+                    ? "PRIMARY"
+                    : "SECONDARY";
+                break;
+            }
+        }
+
+        std::cout << col.name << " "
+                  << dataTypeToString(col.type) << " "
+                  << (col.isPrimaryKey ? "PRIMARY" : "-") << " "
+                  << indexType
+                  << "\n";
+    }
 }
 
 DataType Executor::parseDataType(const std::string& typeStr) {
@@ -241,6 +331,28 @@ DataType Executor::parseDataType(const std::string& typeStr) {
     if (t == "TEXT") return DataType::TEXT;
 
     throw std::runtime_error("Unknown type: " + typeStr);
+}
+
+IndexManager::IndexType Executor::toIndexType(int type) const {
+    if (type == static_cast<int>(IndexManager::PRIMARY)) {
+        return IndexManager::PRIMARY;
+    }
+    if (type == static_cast<int>(IndexManager::SECONDARY)) {
+        return IndexManager::SECONDARY;
+    }
+
+    throw std::runtime_error("Unknown index type");
+}
+
+std::string Executor::dataTypeToString(DataType type) const {
+    switch (type) {
+        case DataType::INT:
+            return "INT";
+        case DataType::TEXT:
+            return "TEXT";
+    }
+
+    return "UNKNOWN";
 }
 
 Value Executor::parseValue(const std::string& valStr, DataType expectedType) {
@@ -257,6 +369,56 @@ Value Executor::parseValue(const std::string& valStr, DataType expectedType) {
     }
 
     throw std::runtime_error("Invalid value type");
+}
+
+std::vector<std::string> Executor::getSelectColumnNames(const SelectQuery& q) const {
+    if (!schemas.count(q.table_name)) {
+        throw std::runtime_error("Table not found");
+    }
+
+    const Schema& schema = schemas.at(q.table_name);
+
+    if (q.columns.size() == 1 && q.columns[0] == "*") {
+        std::vector<std::string> columns;
+        for (const auto& col : schema.columns) {
+            columns.push_back(col.name);
+        }
+        return columns;
+    }
+
+    for (const auto& col : q.columns) {
+        schema.getColumnIndex(col);
+    }
+
+    return q.columns;
+}
+
+void Executor::insertIndexesForRow(
+    const std::string& tableName,
+    const Schema& schema,
+    const Row& row,
+    RID rid
+) {
+    for (size_t i = 0; i < schema.columns.size(); i++) {
+        const auto& col = schema.columns[i];
+        if (col.type == DataType::INT) {
+            indexManager.insert(tableName, col.name, row[i].asInt(), rid);
+        }
+    }
+}
+
+void Executor::removeIndexesForRow(
+    const std::string& tableName,
+    const Schema& schema,
+    const Row& row,
+    RID rid
+) {
+    for (size_t i = 0; i < schema.columns.size(); i++) {
+        const auto& col = schema.columns[i];
+        if (col.type == DataType::INT) {
+            indexManager.remove(tableName, col.name, row[i].asInt(), rid);
+        }
+    }
 }
 
 bool Executor::matchCondition(

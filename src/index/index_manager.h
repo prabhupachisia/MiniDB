@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <string>
 #include <memory>
+#include <optional>
 #include "../index/bptree.h"
 #include "../storage/pager/pager.h"
 
@@ -30,11 +31,20 @@ private:
 public:
     IndexManager(Pager* pager);
 
-    void createIndex(const std::string& table,
+    size_t createIndex(const std::string& table,
+                       const std::string& column,
+                       IndexType type);
+
+    size_t loadIndex(const std::string& table,
                      const std::string& column,
-                     IndexType type);
+                     IndexType type,
+                     size_t rootPage);
 
     void insert(const std::string& table,
+                const std::string& column,
+                int key,
+                RID rid);
+    bool remove(const std::string& table,
                 const std::string& column,
                 int key,
                 RID rid);
@@ -47,10 +57,15 @@ public:
     std::optional<RID> search(const std::string& table,
                               const std::string& column,
                               int key);
+    std::vector<RID> searchAll(const std::string& table,
+                               const std::string& column,
+                               int key);
+    bool hasIndex(const std::string& table,
+                  const std::string& column) const;
 
     void loadIndexesFromMeta();
 
-    void IndexManager::updateRootPage(const std::string& table,
-                                  const std::string& column,
-                                  size_t newRootPage);
+    void updateRootPage(const std::string& table,
+                        const std::string& column,
+                        size_t newRootPage);
 };

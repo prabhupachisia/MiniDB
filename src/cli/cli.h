@@ -14,5 +14,4 @@ public:
     void run();
     void handleMetaCommand(const std::string& input);
     void executeQuery(const std::string& query);
-    void printQuery(Query* q);
 };

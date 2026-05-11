@@ -52,6 +52,9 @@ Token Tokenizer:: readIdentifier(){
     else if (upper == "USE") return {TokenType::USE, value};
     else if (upper == "UPDATE") return {TokenType::UPDATE, value};
     else if (upper == "SET") return {TokenType::SET, value};
+    else if (upper == "COMMIT") return {TokenType::COMMIT, value};
+    else if (upper == "DESCRIBE") return {TokenType::DESCRIBE, value};
+    else if (upper == "DESC") return {TokenType::DESC, value};
 
     return {TokenType::IDENTIFIER,value};
 }
